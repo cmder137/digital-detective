@@ -1,0 +1,45 @@
+# Данные (тяжелые)
+data/
+stage1/
+*.zip
+
+# Чекпоинты и предсказания
+checkpoints/
+predictions/
+submission/
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Логи и временные файлы
+*.log
+results/logs/
+
+# Локальные конфиги
+.env
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+checkpoints/*
+!checkpoints/.gitkeep
+predictions/*
+!predictions/.gitkeep
+results/logs/
+!results/.gitkeep
