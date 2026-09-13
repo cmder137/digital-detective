@@ -1,17 +1,26 @@
-# Данные (тяжелые)
+# Данные (тяжелые) — не коммитим
 data/
 stage1/
 *.zip
+*.tar.gz
 
-# Чекпоинты и предсказания
-checkpoints/
-predictions/
-submission/
+# Содержимое папок игнорируем, но саму структуру (.gitkeep) оставляем
+checkpoints/*
+!checkpoints/.gitkeep
 
-# Кэш Python
+predictions/*
+!predictions/.gitkeep
+
+results/logs/*
+!results/logs/.gitkeep
+
+submission/*
+!submission/.gitkeep
+
+# Кэш Python и Jupyter
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 .ipynb_checkpoints/
 
 # Виртуальные окружения
@@ -21,25 +30,15 @@ env/
 
 # Логи и временные файлы
 *.log
-results/logs/
 
 # Локальные конфиги
 .env
 
-# PyCharm / JetBrains
+# IDE (VS Code и JetBrains)
+.vscode/
 .idea/
 *.iml
 
-# Jupyter
-.ipynb_checkpoints/
-
-# OS
+# Системные файлы ОС
 .DS_Store
 Thumbs.db
-
-checkpoints/*
-!checkpoints/.gitkeep
-predictions/*
-!predictions/.gitkeep
-results/logs/
-!results/.gitkeep
