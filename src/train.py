@@ -1,18 +1,9 @@
 """
 Цикл обучения для AI Challenge 2026 — Digital Detective.
-
-Что делает:
-  1. Прогоняет модель через изображения с использованием AMP (Mixed Precision).
-  2. Векторизованно (на GPU) считает метрику AIC на валидации без переноса на CPU.
-  3. Безопасно сохраняет лучшие веса (best.pth), если AIC улучшился.
-  4. Сохраняет чекпоинт (last.pth) с защитой от поврежденных файлов.
-  5. Логирует метрики в results/metrics.csv.
-
-Запуск:
-    python -m src.train
 """
-
+import logging
 import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,18 +12,15 @@ from tqdm import tqdm
 
 from src.losses import DiceBCELoss
 from src.metrics import AICMeter
-from src.utils import set_seed
-from src.utils import log_metrics
-from src.utils import seed_worker
+from src.utils import set_seed, seed_worker, log_metrics
 
-
-
+# Подхватываем настроенный логгер из run_train.py
+logger = logging.getLogger('digital_detective')
 
 # ============================================================
 # ОБУЧЕНИЕ: ОДНА ЭПОХА (С AMP)
 # ============================================================
 def train_epoch(model, loader, optimizer, criterion, device, scaler):
-    """Одна эпоха обучения с использованием смешанной точности (AMP)."""
     if len(loader) == 0:
         raise ValueError("train_loader пуст. Проверьте данные и фильтр файлов.")
 
@@ -52,7 +40,7 @@ def train_epoch(model, loader, optimizer, criterion, device, scaler):
             loss = criterion(logits, masks)
 
         if not torch.isfinite(loss):
-            print(f"⚠️ WARNING: loss = {loss.item():.6f} (non-finite), пропускаем батч")
+            logger.warning(f"loss = {loss.item():.6f} (non-finite), пропускаем батч")
             continue
 
         scaler.scale(loss).backward()
@@ -70,13 +58,11 @@ def train_epoch(model, loader, optimizer, criterion, device, scaler):
 
     return epoch_loss / max(n_valid_batches, 1)
 
-
 # ============================================================
-# ВАЛИДАЦИЯ: ОДНА ЭПОХА (через единый AICMeter)
+# ВАЛИДАЦИЯ: ОДНА ЭПОХА
 # ============================================================
 @torch.inference_mode()
 def eval_epoch(model, loader, criterion, device, threshold: float = 0.5):
-    """Валидация через унифицированный AICMeter на GPU."""
     if len(loader) == 0:
         return 0.0, 0.0
 
@@ -95,7 +81,6 @@ def eval_epoch(model, loader, criterion, device, threshold: float = 0.5):
 
         epoch_loss += loss.item()
         
-        # Передаем вероятности в векторизованный счетчик
         probs = torch.sigmoid(logits)
         meter.update(probs, masks)
 
@@ -106,12 +91,10 @@ def eval_epoch(model, loader, criterion, device, threshold: float = 0.5):
     
     return val_loss, val_aic
 
-
 # ============================================================
 # ВОЗОБНОВЛЕНИЕ ОБУЧЕНИЯ
 # ============================================================
 def resume_training(model, optimizer, scheduler, save_dir='checkpoints'):
-    """Надежная загрузка чекпоинта last.pth."""
     last_path = os.path.join(save_dir, 'last.pth')
     if not os.path.exists(last_path):
         return 1, -1.0
@@ -124,20 +107,17 @@ def resume_training(model, optimizer, scheduler, save_dir='checkpoints'):
 
         start_epoch = checkpoint['epoch'] + 1
         best_aic = checkpoint.get('best_aic', -1.0)
-        print(f"📂 Возобновление с эпохи {start_epoch}, best_aic = {best_aic:.4f}")
+        logger.info(f"📂 Возобновление с эпохи {start_epoch}, best_aic = {best_aic:.4f}")
         return start_epoch, best_aic
-
     except Exception as e:
-        print(f"⚠️ WARNING: Не удалось загрузить {last_path} ({e}). Начинаем с нуля.")
+        logger.warning(f"Не удалось загрузить {last_path} ({e}). Начинаем с нуля.")
         return 1, -1.0
-
 
 # ============================================================
 # ГЛАВНЫЙ ЦИКЛ ОБУЧЕНИЯ
 # ============================================================
 def train(model, train_loader, val_loader, epochs=10, lr=1e-3,
           device='cuda', save_dir='checkpoints', seed=42, threshold=0.5):
-    """Главный пайплайн обучения."""
     device = torch.device(device) if isinstance(device, str) else device
     set_seed(seed)
     os.makedirs(save_dir, exist_ok=True)
@@ -151,23 +131,22 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3,
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=2
     )
-    
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
     start_epoch, best_aic = resume_training(model, optimizer, scheduler, save_dir)
 
     for epoch in range(start_epoch, epochs + 1):
-        print(f"\nEpoch {epoch}/{epochs}")
+        logger.info(f"--- Epoch {epoch}/{epochs} ---")
         current_lr = optimizer.param_groups[0]['lr']
 
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device, scaler)
         val_loss, val_aic = eval_epoch(model, val_loader, criterion, device, threshold=threshold)
 
-        print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val AIC: {val_aic:.4f} | LR: {current_lr:.2e}")
+        logger.info(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val AIC: {val_aic:.4f} | LR: {current_lr:.2e}")
         log_metrics(epoch, train_loss, val_loss, val_aic, current_lr, log_path=metrics_path)
 
         if np.isnan(val_aic) or np.isinf(val_aic):
-            print(f"⚠️ WARNING: val_aic = {val_aic}, пропускаем обновление скедулера и чекпоинтов!")
+            logger.warning(f"val_aic = {val_aic}, пропускаем обновление скедулера и чекпоинтов!")
             continue
 
         scheduler.step(val_aic)
@@ -175,13 +154,12 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3,
         if val_aic > best_aic:
             best_aic = val_aic
             best_path = os.path.join(save_dir, 'best.pth')
-            # Исправлено: сохраняем метаданные для воспроизводимости
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'best_aic': best_aic,
             }, best_path)
-            print(f"🌟 Новый лучший AIC: {best_aic:.4f}! Модель сохранена.")
+            logger.info(f"🌟 Новый лучший AIC: {best_aic:.4f}! Модель сохранена.")
 
         last_path = os.path.join(save_dir, 'last.pth')
         torch.save({
@@ -192,39 +170,30 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3,
             'best_aic': best_aic,
         }, last_path)
 
-
-# ============================================================
-# ТЕСТОВЫЙ БЛОК (Исправлен DummyModel)
-# ============================================================
 if __name__ == "__main__":
-    print("Запуск тестового прогона цикла обучения...")
+    # Настраиваем базовый логгер для тестов
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+    logger.info("Запуск тестового прогона цикла обучения...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Устройство: {device}")
 
     class DummyModel(nn.Module):
         def __init__(self):
             super().__init__()
-            # Простейшая свертка, чтобы логиты зависели от входа и градиенты текли
             self.conv = nn.Conv2d(3, 1, kernel_size=3, padding=1)
-            
         def forward(self, x):
             return self.conv(x)
 
     model = DummyModel().to(device)
     dummy_images = torch.randn(4, 3, 64, 64)
     dummy_masks = torch.randint(0, 2, (4, 1, 64, 64)).float()
-
     dummy_dataset = TensorDataset(dummy_images, dummy_masks)
     
     g = torch.Generator()
     g.manual_seed(42)
     
     dummy_loader = DataLoader(
-        dummy_dataset,
-        batch_size=2,
-        shuffle=True,
-        worker_init_fn=seed_worker,
-        generator=g
+        dummy_dataset, batch_size=2, shuffle=True,
+        worker_init_fn=seed_worker, generator=g
     )
 
     train(model, dummy_loader, dummy_loader, epochs=2, device=device)

@@ -1,6 +1,21 @@
+"""
+Главная точка входа для запуска обучения (AI Challenge 2026 — Digital Detective).
+
+Зона ответственности скрипта (MLOps / Pipeline):
+1. Парсинг CLI-аргументов и сохранение конфига (config_train.json) для воспроизводимости.
+2. Фиксация всех генераторов случайных чисел (сидов) в основном потоке и воркерах.
+3. Загрузка данных, удаление битых путей и стратифицированное разбиение (Train/Val),
+   чтобы сохранить баланс positive/negative классов в выборках.
+4. Инициализация DataLoader с кастомным collate_fn (перевод словаря в кортеж).
+5. Сборка модели сегментации и предварительный контроль аппаратных лимитов
+   (автоматическая блокировка, если модель превышает 100 GFLOPs).
+6. Запуск полного цикла обучения с записью логов в файл и консоль.
+
+Пример запуска:
+    python scripts/run_train.py --architecture unet --encoder resnet34 --img-size 256 --batch-size 16 --epochs 15
+"""
+
 import argparse
-import json
-import logging
 import os
 import random
 import sys
@@ -9,19 +24,14 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-# Импорты наших модулей
 from src.dataset import read_train_csv, filter_existing_rows, TrainDataset
 from src.model import build_model, ARCH_REGISTRY
 from src.train import train
-from src.utils import set_seed
-from src.utils import seed_worker
+from src.utils import set_seed, seed_worker, setup_logging, get_device, save_json
 
-
-# Пытаемся импортировать стратифицированный сплит от Человека 1
 try:
     from src.dataset import stratified_split
 except ImportError:
-    # Фолбек, если функция еще не влита в main (сигнатура синхронизирована)
     def stratified_split(rows, val_ratio=0.1, seed=42):
         random.seed(seed)
         pos_rows = [r for r in rows if r.get('gt') is not None]
@@ -40,41 +50,19 @@ except ImportError:
         random.shuffle(val_rows)
         return train_rows, val_rows
 
-
-# --- Утилиты для пайплайна ---
-def setup_logging() -> logging.Logger:
-    """Изолированная настройка логгера без сайд-эффектов при импорте модуля"""
-    os.makedirs('results/logs', exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        handlers=[
-            logging.FileHandler('results/logs/train.log'),
-            logging.StreamHandler()
-        ]
-    )
-    return logging.getLogger(__name__)
-
-
 def dict_to_tuple_collate(batch):
-    """Преобразует список словарей (из TrainDataset) в кортеж тензоров (для train.py)"""
     images = torch.stack([b['image'] for b in batch])
     masks = torch.stack([b['mask'] for b in batch])
     return images, masks
 
-
 def check_flops(model, device, img_size, logger):
-    """Безопасная проверка лимита FLOPs перед началом обучения"""
     logger.info("Запуск предварительной проверки FLOPs...")
-    
-    # Изолированный импорт для поддержки старых версий PyTorch
     try:
         from torch.utils.flop_counter import FlopCounterMode
     except ImportError:
-        logger.warning("FlopCounterMode недоступен (требуется PyTorch >= 2.1). Пропуск проверки FLOPs.")
+        logger.warning("FlopCounterMode недоступен. Пропуск проверки FLOPs.")
         return
 
-    # Перевод модели в eval для корректного замера (без порчи BN статистики)
     model.eval()
     dummy_input = torch.randn(1, 3, img_size, img_size, device=device)
     
@@ -92,7 +80,6 @@ def check_flops(model, device, img_size, logger):
     if gflops > 100.0:
         raise RuntimeError(f"БЛОКИРОВКА: Модель потребляет {gflops:.2f} GFLOPs! Лимит превышен.")
 
-
 def main():
     parser = argparse.ArgumentParser(description="Запуск обучения Digital Detective")
     parser.add_argument('--data-dir', type=str, default='data', help='Путь к папке data')
@@ -106,42 +93,30 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.5, help='Порог бинаризации')
     parser.add_argument('--workers', type=int, default=4, help='num_workers для DataLoader')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--fresh', action='store_true', help='Начать с нуля (удалить старые чекпоинты)')
+    parser.add_argument('--fresh', action='store_true', help='Начать с нуля')
     args = parser.parse_args()
 
-    # Валидация аргументов
     if not (0.0 < args.val_split < 1.0):
         parser.error("--val-split должен быть в диапазоне от 0.0 до 1.0")
 
-    logger = setup_logging()
+    logger = setup_logging(log_name='train.log')
 
-    # Очистка чекпоинтов при запуске с нуля
     if args.fresh:
         logger.info("Флаг --fresh: удаление старых чекпоинтов...")
         for p in ['checkpoints/last.pth', 'checkpoints/best.pth']:
             if os.path.exists(p):
                 os.remove(p)
 
-    # 1. Сохранение конфига и инициализация сидов
-    os.makedirs('checkpoints', exist_ok=True)
-    with open('checkpoints/config_train.json', 'w', encoding='utf-8') as f:
-        json.dump(vars(args), f, indent=4, ensure_ascii=False)
+    save_json(vars(args), 'checkpoints/config_train.json')
 
     set_seed(args.seed)
     generator = torch.Generator()
     generator.manual_seed(args.seed)
 
-    # Поддержка MPS для разработки на Mac + CUDA для боевого обучения
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = torch.device('mps')
-    else:
-        device = torch.device('cpu')
+    device = get_device()
         
     logger.info(f"Запуск на {device} | Модель: {args.architecture} | Энкодер: {args.encoder} | Размер: {args.img_size}")
 
-    # 2. Подготовка данных
     data_dir = Path(args.data_dir)
     csv_path = data_dir / 'stage1' / 'train.csv'
     
@@ -152,14 +127,12 @@ def main():
         logger.error(f"Ни одного файла не найдено. Проверьте --data-dir: {args.data_dir}")
         sys.exit(1)
     
-    # Исправлено имя параметра на val_ratio согласно контракту
     train_rows, val_rows = stratified_split(rows, val_ratio=args.val_split, seed=args.seed)
     logger.info(f"Данные разбиты (Stratified): Train={len(train_rows)} | Val={len(val_rows)}")
 
     train_ds = TrainDataset(train_rows, img_size=args.img_size, train=True, data_dir=data_dir)
     val_ds = TrainDataset(val_rows, img_size=args.img_size, train=False, data_dir=data_dir)
 
-    # 3. Инициализация Dataloader
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, 
         num_workers=args.workers, pin_memory=True, drop_last=True,
@@ -173,7 +146,6 @@ def main():
         worker_init_fn=seed_worker, generator=generator
     )
 
-    # 4. Сборка модели и проверка FLOPs
     model = build_model(
         architecture=args.architecture,
         encoder_name=args.encoder,
@@ -184,7 +156,6 @@ def main():
 
     check_flops(model, device, args.img_size, logger)
 
-    # 5. Запуск цикла
     logger.info("Старт обучения...")
     train(
         model=model,
