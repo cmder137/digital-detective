@@ -68,48 +68,107 @@ def build_model(
         encoder_weights=encoder_weights,
         in_channels=in_channels,
         classes=classes,
+        activation=None, 
     )
     
     return model
 
 
 if __name__ == "__main__":
-    # Sanity-check и профилирование (вызывается через python -m src.model)
-    from torch.utils.flop_counter import FlopCounterMode
-    
-    print("Собираем базовую модель UNet (ResNet34)...")
-    
-    # Модель создается на CPU (как положено)
+    print("Проверка модели и замер ресурсов...")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Устройство: {device}")
+
+    # Изолированный импорт профилировщика
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+    except ImportError as exc:
+        raise RuntimeError("FlopCounterMode недоступен. Проверьте версию PyTorch.") from exc
+
+    # Параметры бенчмарка
+    test_size = 256
+    test_in_channels = 3
+    test_classes = 1
+
+    dummy_input = torch.randn(1, test_in_channels, test_size, test_size, device=device)
+
     model = build_model(
         architecture='unet', 
         encoder_name='resnet34',
-        encoder_weights=None # Для тестов скачивать веса не нужно
-    ).eval()
-    
-    # Эмулируем 1 картинку 256x256 (один инференс)
-    dummy_input = torch.randn(1, 3, 256, 256)
-    
-    print(f"Размерность входа: {dummy_input.shape}")
-    
-    # Используем встроенный в PyTorch 2+ профилировщик
-    with FlopCounterMode(model, display=False) as flop_counter:
+        encoder_weights=None,
+        in_channels=test_in_channels,
+        classes=test_classes
+    ).to(device).eval()
+
+    # --- 1. Замер FLOPs (с защитой сигнатуры) ---
+    try:
+        flop_ctx = FlopCounterMode(model, display=False)
+    except TypeError:
+        flop_ctx = FlopCounterMode(display=False)
+
+    with flop_ctx as flop_counter, torch.no_grad():
         output = model(dummy_input)
-        
-    # Организаторы пишут: 100 GFLOPs = 50 GMACs. 
-    # FlopCounterMode считает строгие FLOPs, но иногда его путают с MACs. 
-    # В PyTorch 2 FlopCounterMode выдает именно FLOPs, так что мы просто берем это число.
+            
     total_flops = flop_counter.get_total_flops()
+    if total_flops <= 0:
+        raise RuntimeError("FlopCounterMode вернул <= 0. Проверьте совместимость PyTorch.")
+        
     gflops = total_flops / 1e9
     params_m = sum(p.numel() for p in model.parameters()) / 1e6
+
+    # --- 2. Замер задержки (Latency - per request) ---
+    warmup_iters = 50 if device.type == 'cuda' else 20
+    iters = 200
+    latencies_ms = []
+
+    with torch.inference_mode():
+        # Прогрев
+        for _ in range(warmup_iters):
+            model(dummy_input)
+            
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+            
+        # Основной цикл
+        for _ in range(iters):
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+            
+            t0 = time.perf_counter()
+            model(dummy_input)
+            
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+                
+            latencies_ms.append((time.perf_counter() - t0) * 1000)
+
+    latency_median = statistics.median(latencies_ms)
+    latency_p95 = sorted(latencies_ms)[min(int(0.95 * len(latencies_ms)), len(latencies_ms) - 1)]
+    latency_max = max(latencies_ms)
+
+    # --- 3. Итоги и строгие проверки ---
+    print(f"\nРазмер входа: {test_size}x{test_size}x{test_in_channels}")
+    print(f"Параметры:    {params_m:.2f} M")
+    print(f"GFLOPs:       {gflops:.2f} (Лимит: <= 100.00)")
+    print("ℹ️  FLOPs посчитаны через FlopCounterMode (строгие FLOPs, 1 MAC = 2 FLOPs).")
+    print("   Согласно правилам конкурса, этот инструмент является арбитром.\n")
     
-    assert output.shape == (1, 1, 256, 256), f"Неверная размерность выхода: {output.shape}"
-    
-    print(f"✅ Модель успешно собрана!")
-    print(f"Выходная размерность: {output.shape}")
-    print(f"Параметры: {params_m:.2f} M")
-    print(f"Строгие GFLOPs: {gflops:.2f} (Лимит: 100.00 GFLOPs)")
-    
-    if gflops > 100:
-        print("❌ КРИТИЧЕСКИ: Превышен лимит GFLOPs для одного изображения!")
+    print(f"Latency Med:  {latency_median:.2f} мс (Лимит: <= 50.00 мс)")
+    print(f"Latency p95:  {latency_p95:.2f} мс")
+    print(f"Latency Max:  {latency_max:.2f} мс")
+    print("⚠️  Локальный замер. Тестирование будет на H100 (быстрее в ~2-3 раза).\n")
+
+    if output.shape != (1, test_classes, test_size, test_size):
+        raise RuntimeError(f"Неверная форма выхода: {output.shape}")
+
+    if gflops > 100.0:
+        raise RuntimeError(f"Превышен лимит по GFLOPs: {gflops:.2f} > 100.00")
+        
+    if latency_median > 50.0:
+        raise RuntimeError(f"Превышен лимит латентности по медиане: {latency_median:.2f} мс > 50.00")
+        
+    if latency_max > 50.0:
+        print(f"⚠️ ВНИМАНИЕ: max ({latency_max:.2f} мс) выше 50 мс.")
+        print("   На H100, вероятно, пройдёт, но рекомендуется оптимизация или замер на целевом железе.")
     else:
-        print("✅ Лимит GFLOPs соблюден с запасом.")
+        print("\n✅ Все лимиты соревнования успешно соблюдены.")
