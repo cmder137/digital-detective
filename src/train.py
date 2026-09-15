@@ -11,6 +11,7 @@
 Запуск:
     python -m src.train
 """
+
 import os
 import csv
 import random
@@ -21,6 +22,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
 
 from src.losses import DiceBCELoss
+from src.metrics import AICMeter
 
 # ============================================================
 # ВОСПРОИЗВОДИМОСТЬ
@@ -113,17 +115,17 @@ def train_epoch(model, loader, optimizer, criterion, device, scaler):
 
 
 # ============================================================
-# ВАЛИДАЦИЯ: ОДНА ЭПОХА (Векторизовано на GPU)
+# ВАЛИДАЦИЯ: ОДНА ЭПОХА (через единый AICMeter)
 # ============================================================
 @torch.inference_mode()
 def eval_epoch(model, loader, criterion, device, threshold: float = 0.5):
-    """Валидация. Метрика считается тензорно прямо на GPU, без for-циклов."""
+    """Валидация через унифицированный AICMeter на GPU."""
     if len(loader) == 0:
         return 0.0, 0.0
 
     model.eval()
     epoch_loss = 0.0
-    total_dice, n_pos, n_neg, n_false_alarm = 0.0, 0, 0, 0
+    meter = AICMeter(pred_threshold=threshold, gt_threshold=0.5)
 
     pbar = tqdm(loader, desc="Validating", leave=False)
     for images, masks in pbar:
@@ -135,44 +137,17 @@ def eval_epoch(model, loader, criterion, device, threshold: float = 0.5):
             loss = criterion(logits, masks)
 
         epoch_loss += loss.item()
-
-        preds = (torch.sigmoid(logits) >= threshold).float()
-
-        gt_sums = masks.sum(dim=(1, 2, 3))
-        pred_sums = preds.sum(dim=(1, 2, 3))
-        intersections = (preds * masks).sum(dim=(1, 2, 3))
-
-        is_pos = gt_sums > 0
-        is_neg = ~is_pos
-
-        n_pos += is_pos.sum().item()
-        n_neg += is_neg.sum().item()
-
-        if is_pos.any():
-            dice = 2.0 * intersections[is_pos] / (pred_sums[is_pos] + gt_sums[is_pos] + 1e-6)
-            total_dice += dice.sum().item()
-
-        if is_neg.any():
-            area_threshold = 0.01 * (masks.shape[-2] * masks.shape[-1])
-            false_alarms = pred_sums[is_neg] >= area_threshold
-            n_false_alarm += false_alarms.sum().item()
+        
+        # Передаем вероятности в векторизованный счетчик
+        probs = torch.sigmoid(logits)
+        meter.update(probs, masks)
 
         pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-    if n_pos == 0:
-        print("⚠️ WARNING: В валидации нет positive-примеров.")
-        return epoch_loss / len(loader), 0.0
-
-    mean_dice = total_dice / n_pos
-    fpr_neg = (n_false_alarm / n_neg) if n_neg > 0 else 0.0
-    component2 = 1.0 - fpr_neg
-
-    aic_score = (
-        2.0 * (mean_dice * component2) / (mean_dice + component2)
-        if (mean_dice + component2) > 0
-        else 0.0
-    )
-    return epoch_loss / len(loader), float(aic_score)
+    val_loss = epoch_loss / len(loader)
+    val_aic = meter.compute()
+    
+    return val_loss, val_aic
 
 
 # ============================================================
@@ -243,7 +218,12 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3,
         if val_aic > best_aic:
             best_aic = val_aic
             best_path = os.path.join(save_dir, 'best.pth')
-            torch.save(model.state_dict(), best_path)
+            # Исправлено: сохраняем метаданные для воспроизводимости
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'best_aic': best_aic,
+            }, best_path)
             print(f"🌟 Новый лучший AIC: {best_aic:.4f}! Модель сохранена.")
 
         last_path = os.path.join(save_dir, 'last.pth')
@@ -257,7 +237,7 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3,
 
 
 # ============================================================
-# ТЕСТОВЫЙ БЛОК (Запуск без реальных данных)
+# ТЕСТОВЫЙ БЛОК (Исправлен DummyModel)
 # ============================================================
 if __name__ == "__main__":
     print("Запуск тестового прогона цикла обучения...")
@@ -265,12 +245,17 @@ if __name__ == "__main__":
     print(f"Устройство: {device}")
 
     class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Простейшая свертка, чтобы логиты зависели от входа и градиенты текли
+            self.conv = nn.Conv2d(3, 1, kernel_size=3, padding=1)
+            
         def forward(self, x):
-            return torch.randn(x.size(0), 1, x.size(2), x.size(3), device=x.device)
+            return self.conv(x)
 
     model = DummyModel().to(device)
     dummy_images = torch.randn(4, 3, 64, 64)
-    dummy_masks = torch.randint(0, 2, (4, 1, 64, 64))
+    dummy_masks = torch.randint(0, 2, (4, 1, 64, 64)).float()
 
     dummy_dataset = TensorDataset(dummy_images, dummy_masks)
     

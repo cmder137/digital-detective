@@ -37,22 +37,27 @@ class DiceBCELoss(nn.Module):
         return self.w_bce * bce_loss + self.w_dice * dice_loss
 
 if __name__ == "__main__":
-    print("Запуск тестов лосса (проверка крайних случаев)...")
+    print("Проверка DiceBCELoss...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Тестируем на устройстве: {device}")
     
     criterion = DiceBCELoss().to(device)
-    
-    # Создаем dummy-target (N, 1, H, W)
-    targets = torch.zeros((2, 1, 64, 64), device=device).float()
-    targets[:, :, 10:20, 10:20] = 1.0 # Рисуем квадратик
-    
-    # 1. Идеальные предсказания (очень большие логиты там где 1, и очень маленькие там где 0)
-    perfect_logits = torch.where(targets == 1.0, torch.tensor(15.0), torch.tensor(-15.0)).to(device)
-    loss_perfect = criterion(perfect_logits, targets)
-    print(f"Лосс при идеальном предсказании (должен быть ~0): {loss_perfect.item():.6f}")
-    
-    # 2. Полностью неверные (инвертированные) предсказания
-    inverted_logits = torch.where(targets == 1.0, torch.tensor(-15.0), torch.tensor(15.0)).to(device)
-    loss_inverted = criterion(inverted_logits, targets)
-    print(f"Лосс при инвертированном предсказании (должен быть большим): {loss_inverted.item():.6f}")
+    targets = torch.randint(0, 2, (4, 1, 256, 256), device=device).float()
+
+    # 1. Случайные логиты
+    preds_random = torch.randn(4, 1, 256, 256, device=device)
+    loss_random = criterion(preds_random, targets)
+    print(f"Random logits:  {loss_random.item():.4f}")
+
+    # 2. Идеальные логиты (+15 для 1, -15 для 0)
+    preds_perfect = (targets * 2 - 1) * 15
+    loss_perfect = criterion(preds_perfect, targets)
+    print(f"Perfect logits: {loss_perfect.item():.4f}  (должно быть ~0)")
+    assert loss_perfect.item() < 0.01, "Лосс на идеальных предсказаниях слишком большой"
+
+    # 3. Инвертированные логиты
+    loss_wrong = criterion(-preds_perfect, targets)
+    print(f"Wrong logits:   {loss_wrong.item():.4f}  (должно быть >> 0)")
+    assert loss_wrong.item() > 1.0, "Лосс на неправильных предсказаниях слишком маленький"
+
+    print("✅ Все тесты пройдены")
