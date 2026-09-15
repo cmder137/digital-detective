@@ -1,9 +1,23 @@
-import os
+"""
+Утилиты общего назначения для проекта Digital Detective.
+
+Содержит:
+  - Воспроизводимость: set_seed(), seed_worker()
+  - Логирование: setup_logging(), log_metrics()
+  - Железо: get_device()
+  - I/O: ensure_dir(), save_json(), load_json()
+
+Зона ответственности: Человек 3 (MLOps), но используется всеми.
+"""
 import csv
+import json
+import logging
+import os
 import random
+from pathlib import Path
+
 import numpy as np
 import torch
-
 
 # ============================================================
 # ВОСПРОИЗВОДИМОСТЬ
