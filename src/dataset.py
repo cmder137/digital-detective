@@ -15,6 +15,9 @@
 Запуск теста:
     python -m src.dataset
 """
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import csv
 from pathlib import Path
 from typing import Dict, List, Optional
