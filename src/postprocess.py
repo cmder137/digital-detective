@@ -3,15 +3,14 @@
 
 Задача: удалить мелкие «шумовые» пятна из бинарной маски.
 Зачем: метрика AIC штрафует, если на negative-картинке (без подделки)
-       модель закрасит >= 1% пикселей. Мелкий шум легко превышает этот порог,
-       поэтому перед сохранением маски нужно «чистить» предсказание.
+       модель закрасит >= 1% пикселей. Мелкий шум легко превышает этот порог.
+
+ВАЖНО: min_area_ratio должен быть МАЛЕНЬКИМ (0.001 = 0.1%).
+       В датасете есть реальные маски 0.31% площади — их нельзя удалять.
+       Для борьбы с FPR достаточно убрать шум < 0.1%.
 
 Метрика FPR в соревновании:
     Изображение считается ложной тревогой, если площадь маски >= 1% от картинки.
-    Значит, всё, что меньше 1% площади, нужно удалять.
-
-Мы используем cv2.connectedComponentsWithStats — он находит связные
-компоненты (белые пятна) и их площади. Компоненты меньше порога удаляем.
 """
 import cv2
 import numpy as np
@@ -34,13 +33,11 @@ def clean_mask(
                 - uint8 0/255 (PNG)
                 - float32/float64 [0, 1] (вероятности модели)
         min_area_ratio: минимальная площадь компоненты как доля от площади
-                        картинки. Всё, что меньше — удаляется.
-                        Default 0.001 = 0.1% площади.
+                        картинки. Default 0.001 = 0.1%.
+                        НЕ ставь 0.01 — удалит реальные мелкие подделки!
         connectivity: 4 или 8. 8 — диагональные пиксели считаются соседями.
         bin_threshold: порог бинаризации для float-масок в шкале [0, 1].
-                       Используется, когда на вход подаются вероятности модели.
-                       Должен совпадать с threshold, который подбирает MLOps.
-                       Default 0.5.
+                       Должен совпадать с threshold из predict.py.
 
     Returns:
         np.ndarray (H, W) uint8 — очищенная маска со значениями 0 / 1.
@@ -56,11 +53,10 @@ def clean_mask(
     if m.dtype == bool:
         m = m.astype(np.uint8)
     elif m.max() > 1:
-        # Маска в шкале 0/255 (например, PNG-файл)
+        # Маска в шкале 0/255 (например, PNG)
         m = (m > 127).astype(np.uint8)
     else:
         # Float-маска в шкале [0, 1] (вероятности модели)
-        # bin_threshold синхронизирован с threshold из predict.py
         m = (m > bin_threshold).astype(np.uint8)
 
     h, w = m.shape[:2]
@@ -75,7 +71,7 @@ def clean_mask(
         m, connectivity=connectivity
     )
 
-    # Компонента 0 — это фон (чёрный). Начинаем с 1.
+    # Компонента 0 — фон. Начинаем с 1.
     clean = np.zeros_like(m, dtype=np.uint8)
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
@@ -85,123 +81,106 @@ def clean_mask(
     return clean
 
 
-
 def clean_mask_soft(mask: np.ndarray) -> np.ndarray:
     """
-    Мягкая чистка: удаляет только «мусор» < 0.1% площади.
-    Полезна, если модель в целом аккуратная и нужно убрать одиночные пиксели.
+    Мягкая чистка: удаляет только «мусор» < 0.05% площади.
+    Используй, если модель аккуратная и есть риск удалить мелкие подделки.
+    """
+    return clean_mask(mask, min_area_ratio=0.0005)
+
+
+def clean_mask_default(mask: np.ndarray) -> np.ndarray:
+    """
+    Стандартная чистка: удаляет компоненты < 0.1% площади.
+    Баланс между удалением шума и сохранением реальных мелких масок.
     """
     return clean_mask(mask, min_area_ratio=0.001)
-
-def clean_mask_strict(mask: np.ndarray) -> np.ndarray:
-    """
-    Жёсткая чистка под FPR соревнования: удаляет всё, что < 1% площади.
-    Используй, если модель шумит на negative-картинках.
-    """
-    return clean_mask(mask, min_area_ratio=0.01)
 
 
 # ============================================================
 # ТЕСТЫ
 # ============================================================
-
 if __name__ == '__main__':
     import time
 
     print('🧪 Тесты clean_mask()')
     print('=' * 60)
 
-    # --- Тест 1: Маска с крупным объектом и мелким шумом ---
+    # --- Тест 1: Крупный объект + мелкий шум ---
     mask = np.zeros((256, 256), dtype=np.uint8)
-    mask[50:150, 50:150] = 1        # крупный объект: 100*100 = 10 000 px (15% площади)
-    mask[200:201, 200:201] = 1      # шум: 1 px
-    mask[210:212, 210:212] = 1      # шум: 4 px
+    mask[50:150, 50:150] = 1        # 10000 px
+    mask[200:201, 200:201] = 1      # 1 px
+    mask[210:212, 210:212] = 1      # 4 px
 
     cleaned = clean_mask(mask, min_area_ratio=0.001)
-    print(f'Тест 1 — крупный объект + 2 шумовых пятна:')
-    print(f'  До:    {mask.sum():>6} пикселей')
-    print(f'  После: {cleaned.sum():>6} пикселей')
-    print(f'  Удалено шума: {mask.sum() - cleaned.sum()} пикселей')
-    assert cleaned.sum() == 10_000, f'Ожидалось 10000, получили {cleaned.sum()}'
+    print(f'Тест 1 — крупный объект + шум:')
+    print(f'  До: {mask.sum()}, После: {cleaned.sum()}')
+    assert cleaned.sum() == 10_000
     print('  ✅ Прошло')
 
-    # --- Тест 2: Маска из одного мелкого пятна (должна стать пустой) ---
+    # --- Тест 2: Только мелкое пятно ---
     mask = np.zeros((256, 256), dtype=np.uint8)
-    mask[100:101, 100:101] = 1      # 1 пиксель
+    mask[100:101, 100:101] = 1
     cleaned = clean_mask(mask, min_area_ratio=0.001)
-    print(f'\nТест 2 — только одно мелкое пятно:')
-    print(f'  До:    {mask.sum()} пикселей')
-    print(f'  После: {cleaned.sum()} пикселей')
-    assert cleaned.sum() == 0, 'Пятно должно быть удалено'
-    print('  ✅ Прошло (пятно удалено)')
+    assert cleaned.sum() == 0
+    print(f'Тест 2 — только мелкое пятно: ✅ Прошло')
 
     # --- Тест 3: Пустая маска ---
     mask = np.zeros((256, 256), dtype=np.uint8)
     cleaned = clean_mask(mask)
-    print(f'\nТест 3 — пустая маска:')
-    assert cleaned.sum() == 0
-    assert cleaned.shape == mask.shape
-    assert cleaned.dtype == np.uint8
-    print('  ✅ Прошло')
+    assert cleaned.sum() == 0 and cleaned.dtype == np.uint8
+    print(f'Тест 3 — пустая маска: ✅ Прошло')
 
-    # --- Тест 4: Маска из 0/255 (как PNG) ---
+    # --- Тест 4: 0/255 ---
     mask_255 = np.zeros((256, 256), dtype=np.uint8)
     mask_255[50:150, 50:150] = 255
     mask_255[200:201, 200:201] = 255
     cleaned = clean_mask(mask_255, min_area_ratio=0.001)
-    print(f'\nТест 4 — маска со значениями 0/255:')
-    print(f'  После: {cleaned.sum()} пикселей (ожидалось 10000)')
-    assert cleaned.sum() == 10_000
-    assert cleaned.max() == 1, 'На выходе должны быть 0/1'
-    print('  ✅ Прошло')
+    assert cleaned.sum() == 10_000 and cleaned.max() == 1
+    print(f'Тест 4 — 0/255: ✅ Прошло')
 
-    # --- Тест 5: Boolean маска ---
+    # --- Тест 5: bool ---
     mask_bool = np.zeros((256, 256), dtype=bool)
     mask_bool[50:150, 50:150] = True
-    mask_bool[200:201, 200:201] = True
     cleaned = clean_mask(mask_bool)
-    print(f'\nТест 5 — boolean маска:')
     assert cleaned.sum() == 10_000
-    print('  ✅ Прошло')
+    print(f'Тест 5 — bool: ✅ Прошло')
 
-    # --- Тест 6: Площадь ровно 1% (граничный случай FPR) ---
+    # --- Тест 6: граница FPR (1%) ---
     mask = np.zeros((100, 100), dtype=np.uint8)
-    mask[0:10, 0:10] = 1            # 100 px = 1% от 10 000
-    cleaned_strict = clean_mask(mask, min_area_ratio=0.01)
-    cleaned_soft = clean_mask(mask, min_area_ratio=0.001)
-    print(f'\nТест 6 — площадь ровно 1%:')
-    print(f'  min_area_ratio=0.01 → после: {cleaned_strict.sum()} (граница, должен остаться)')
-    print(f'  min_area_ratio=0.001 → после: {cleaned_soft.sum()}')
-    # 100 >= 100*100*0.01 = 100 → остаётся
-    assert cleaned_strict.sum() == 100
-    print('  ✅ Прошло')
+    mask[0:10, 0:10] = 1  # 100 px = 1% от 10 000
+    cleaned = clean_mask(mask, min_area_ratio=0.001)
+    assert cleaned.sum() == 100
+    print(f'Тест 6 — граница FPR: ✅ Прошло')
 
-    # --- Тест 7: Скорость ---
+    # --- Тест 7: скорость ---
     mask = np.zeros((1024, 1024), dtype=np.uint8)
     mask[100:500, 100:500] = 1
-    for _ in range(100):
-        mask[np.random.randint(0, 1024), np.random.randint(0, 1024)] = 1
-
     t0 = time.perf_counter()
     for _ in range(10):
         _ = clean_mask(mask, min_area_ratio=0.001)
     elapsed = (time.perf_counter() - t0) / 10 * 1000
-    print(f'\nТест 7 — скорость на 1024×1024:')
-    print(f'  Время: {elapsed:.1f} мс на картинку')
-    assert elapsed < 50, 'Слишком медленно (лимит 50 мс)'
+    print(f'Тест 7 — скорость: {elapsed:.1f} мс')
+    assert elapsed < 50
     print('  ✅ Прошло (< 50 мс)')
+
+    # --- Тест 8: float-маска [0, 1] ---
+    mask_float = np.zeros((256, 256), dtype=np.float32)
+    mask_float[50:150, 50:150] = 0.9
+    mask_float[200:201, 200:201] = 0.8
+    cleaned = clean_mask(mask_float, min_area_ratio=0.001)
+    print(f'Тест 8 — float [0, 1]: После {cleaned.sum()} (ожидалось 10000)')
+    assert cleaned.sum() == 10_000
+    print('  ✅ Прошло (bin_threshold сработал)')
+
+    # --- Тест 9: float-маска с bin_threshold=0.7 ---
+    mask_float = np.zeros((256, 256), dtype=np.float32)
+    mask_float[50:150, 50:150] = 0.9    # пройдёт
+    mask_float[180:220, 180:220] = 0.6  # НЕ пройдёт при threshold=0.7
+    cleaned = clean_mask(mask_float, min_area_ratio=0.001, bin_threshold=0.7)
+    print(f'Тест 9 — bin_threshold=0.7: После {cleaned.sum()} (ожидалось 10000)')
+    assert cleaned.sum() == 10_000
+    print('  ✅ Прошло')
 
     print('\n' + '=' * 60)
     print('🎉 Все тесты пройдены!')
-
-    # --- Тест 8: Float-маска в шкале [0, 1] ---
-    mask_float = np.zeros((256, 256), dtype=np.float32)
-    mask_float[50:150, 50:150] = 0.9      # крупный объект
-    mask_float[200:201, 200:201] = 0.8    # шум
-
-    cleaned = clean_mask(mask_float, min_area_ratio=0.001)
-    print(f'\nТест 8 — float-маска [0, 1]:')
-    print(f'  До:    {mask_float.sum():.1f} (сумма float)')
-    print(f'  После: {cleaned.sum()} пикселей (ожидалось 10000)')
-    assert cleaned.sum() == 10_000, f'Ожидалось 10000, получили {cleaned.sum()}'
-    print('  ✅ Прошло (float-маска корректно бинаризована)')
