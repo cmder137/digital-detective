@@ -5,19 +5,26 @@
   - Утилиты: load_rgb, load_mask_binary, resolve_path.
   - Чтение CSV: read_train_csv, read_test_csv.
   - Фильтрацию строк без файлов: filter_existing_rows.
+  - Стратифицированное разбиение: stratified_split.
   - Dataset-классы: TrainDataset, TestDataset.
 
+ВАЖНО (защита от label noise):
+  Если в CSV указан gt_path, но файла маски нет — строка ПРОПУСКАЕТСЯ,
+  а НЕ превращается в negative. Иначе модель учится игнорировать подделки.
+
 Особенности:
-  - Поддержка negative-примеров: если gt_path пустой — возвращаем нулевую маску.
-  - Умное разрешение путей: работает, если CSV и диск расходятся на 'stage1/'.
+  - Поддержка negative-примеров: если gt_path пустой — нулевая маска.
+  - Умное разрешение путей (совместимо с разными структурами папок).
   - ImageNet-нормализация — в src/transforms.py.
 
 Запуск теста:
     python -m src.dataset
 """
 import csv
+import random
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -94,7 +101,7 @@ def read_train_csv(csv_path: Path) -> List[Dict]:
     Читает train.csv.
 
     Возвращает список словарей: {'chng': str, 'gt': Optional[str]}.
-    Если gt_path пустой — 'gt' = None (negative-пример).
+    Если gt_path пустой — 'gt' = None (это настоящий negative).
     """
     rows = []
     with open(csv_path, newline='', encoding='utf-8') as f:
@@ -112,10 +119,7 @@ def read_train_csv(csv_path: Path) -> List[Dict]:
 
 
 def read_test_csv(csv_path: Path) -> List[Dict]:
-    """
-    Читает test.csv.
-    Возвращает список словарей: {'chng': str}.
-    """
+    """Читает test.csv. Возвращает [{'chng': str}, ...]."""
     rows = []
     with open(csv_path, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -127,13 +131,21 @@ def read_test_csv(csv_path: Path) -> List[Dict]:
     return rows
 
 
-def filter_existing_rows(rows: List[Dict], data_dir: Path,
-                         show_progress: bool = True) -> List[Dict]:
+def filter_existing_rows(
+    rows: List[Dict],
+    data_dir: Path,
+    show_progress: bool = True,
+) -> List[Dict]:
     """
-    Оставляет только те строки, у которых есть файл изображения.
-    Если gt указан, но файла нет — строка считается negative (gt=None).
+    Оставляет только те строки, у которых есть все нужные файлы.
 
-    Возвращает отфильтрованный список.
+    КРИТИЧНО (защита от label noise):
+      - Если нет img — строка пропускается.
+      - Если в CSV указан gt_path, но файла маски нет — строка
+        ПРОПУСКАЕТСЯ, а не превращается в negative.
+
+    Returns:
+        Отфильтрованный список строк.
     """
     try:
         from tqdm import tqdm
@@ -142,20 +154,74 @@ def filter_existing_rows(rows: List[Dict], data_dir: Path,
         iterator = rows
 
     result = []
+    n_missing_img = 0
+    n_missing_gt = 0
+
     for row in iterator:
         img_path = resolve_path(row['chng'], data_dir)
         if not img_path.exists():
+            n_missing_img += 1
             continue
 
         gt = row.get('gt')
         if gt is not None:
             gt_path = resolve_path(gt, data_dir)
             if not gt_path.exists():
-                # Файла маски нет — трактуем как negative
-                row = {'chng': row['chng'], 'gt': None}
+                # Маска указана, но файла нет — это потерянный positive.
+                # НЕ превращаем в negative, а пропускаем.
+                n_missing_gt += 1
+                continue
 
         result.append(row)
+
+    if show_progress:
+        print(f'   Пропущено (нет img):   {n_missing_img}')
+        print(f'   Пропущено (нет mask):  {n_missing_gt}')
+        print(f'   Осталось для обучения: {len(result)}')
+
     return result
+
+
+# ============================================================
+# СТРАТИФИЦИРОВАННОЕ РАЗБИЕНИЕ
+# ============================================================
+def stratified_split(
+    rows: List[Dict],
+    val_ratio: float = 0.15,
+    seed: int = 42,
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Стратифицированное разбиение train/val по классам (positive/negative).
+
+    Гарантирует, что в train и val одинаковая доля positive и negative.
+    Это важно для метрики AIC: FPR считается по negative, и если их
+    в val мало — метрика становится шумной.
+
+    Args:
+        rows: список строк датасета (с полем 'gt').
+        val_ratio: доля val (0..1). Default 0.15.
+        seed: random seed для воспроизводимости.
+
+    Returns:
+        (train_rows, val_rows)
+    """
+    rng = random.Random(seed)
+
+    # Разделяем на positive / negative
+    positives = [r for r in rows if r.get('gt') is not None]
+    negatives = [r for r in rows if r.get('gt') is None]
+
+    train_rows, val_rows = [], []
+
+    for group in (positives, negatives):
+        rng.shuffle(group)
+        n_val = max(1, int(len(group) * val_ratio))
+        val_rows.extend(group[:n_val])
+        train_rows.extend(group[n_val:])
+
+    rng.shuffle(train_rows)
+    rng.shuffle(val_rows)
+    return train_rows, val_rows
 
 
 # ============================================================
@@ -169,10 +235,15 @@ class TrainDataset(Dataset):
       'image': torch.Tensor (3, H, W) — нормализованное RGB-изображение
       'mask':  torch.Tensor (1, H, W) — бинарная маска {0.0, 1.0}
 
-    Если строка — negative (gt=None), маска будет полностью нулевой.
+    Если строка — negative (gt=None), маска полностью нулевая.
     """
-    def __init__(self, rows: List[Dict], img_size: int,
-                 train: bool = True, data_dir: Path = Path('data')):
+    def __init__(
+        self,
+        rows: List[Dict],
+        img_size: int = 384,
+        train: bool = True,
+        data_dir: Path = Path('data'),
+    ):
         self.rows = rows
         self.img_size = img_size
         self.train = train
@@ -205,7 +276,6 @@ class TrainDataset(Dataset):
         img_t = augmented['image']     # (3, H, W) float32
         mask_t = augmented['mask']     # (H, W) float32
 
-        # Приводим маску к форме (1, H, W)
         if isinstance(mask_t, np.ndarray):
             mask_t = torch.from_numpy(mask_t)
         if mask_t.ndim == 2:
@@ -227,8 +297,12 @@ class TestDataset(Dataset):
       'orig_h':    int  — оригинальная высота
       'orig_w':    int  — оригинальная ширина
     """
-    def __init__(self, rows: List[Dict], img_size: int,
-                 data_dir: Path = Path('data')):
+    def __init__(
+        self,
+        rows: List[Dict],
+        img_size: int = 384,
+        data_dir: Path = Path('data'),
+    ):
         self.rows = rows
         self.img_size = img_size
         self.data_dir = Path(data_dir)
@@ -274,9 +348,12 @@ if __name__ == '__main__':
         print('❌ Нет доступных картинок. Проверь --data-dir.')
         raise SystemExit(1)
 
+    # Стратифицированное разбиение
+    train_rows, val_rows = stratified_split(rows, val_ratio=0.15, seed=42)
+    print(f'   Train: {len(train_rows)}, Val: {len(val_rows)}')
+
     # --- Тест TrainDataset ---
-    subset = rows[:16]
-    ds = TrainDataset(subset, img_size=256, train=True, data_dir=DATA_DIR)
+    ds = TrainDataset(train_rows[:16], img_size=384, train=True, data_dir=DATA_DIR)
     loader = DataLoader(ds, batch_size=4, shuffle=False, num_workers=0)
 
     batch = next(iter(loader))
@@ -284,15 +361,13 @@ if __name__ == '__main__':
     print(f'image:       {batch["image"].shape} {batch["image"].dtype}')
     print(f'mask:        {batch["mask"].shape} {batch["mask"].dtype}')
     print(f'mask unique: {torch.unique(batch["mask"])}')
-    print(f'mask range:  [{batch["mask"].min():.2f}, {batch["mask"].max():.2f}]')
     print('✅ TrainDataset работает')
 
     # --- Тест TestDataset ---
-    test_ds = TestDataset(subset[:4], img_size=256, data_dir=DATA_DIR)
+    test_ds = TestDataset(train_rows[:4], img_size=384, data_dir=DATA_DIR)
     test_loader = DataLoader(test_ds, batch_size=2, shuffle=False, num_workers=0)
     batch_t = next(iter(test_loader))
     print()
     print(f'test image: {batch_t["image"].shape}')
     print(f'test orig:  {batch_t["orig_h"].tolist()} x {batch_t["orig_w"].tolist()}')
-    print(f'test paths: {batch_t["chng_path"]}')
     print('✅ TestDataset работает')
