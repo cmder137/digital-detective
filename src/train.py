@@ -13,8 +13,6 @@
 """
 
 import os
-import csv
-import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -23,52 +21,11 @@ from tqdm import tqdm
 
 from src.losses import DiceBCELoss
 from src.metrics import AICMeter
-
-# ============================================================
-# ВОСПРОИЗВОДИМОСТЬ
-# ============================================================
-def set_seed(seed: int = 42):
-    """Фиксируем seed для полной воспроизводимости."""
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    
-    if hasattr(torch.backends, 'cudnn'):
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    if hasattr(torch.backends, 'cuda'):
-        torch.backends.cuda.matmul.allow_tf32 = False
+from src.utils import set_seed
+from src.utils import log_metrics
+from src.utils import seed_worker
 
 
-def seed_worker(worker_id):
-    """Фиксируем сиды в каждом воркере DataLoader."""
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
-
-# ============================================================
-# ЛОГИРОВАНИЕ
-# ============================================================
-def log_metrics(epoch, train_loss, val_loss, val_aic, lr, log_path='results/metrics.csv'):
-    """Безопасное логирование метрик в CSV."""
-    log_dir = os.path.dirname(log_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    file_exists = os.path.exists(log_path)
-    with open(log_path, 'a', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['epoch', 'train_loss', 'val_loss', 'val_aic', 'lr'])
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow({
-            'epoch': epoch,
-            'train_loss': f"{train_loss:.6f}",
-            'val_loss': f"{val_loss:.6f}",
-            'val_aic': f"{val_aic:.6f}",
-            'lr': f"{lr:.2e}"
-        })
 
 
 # ============================================================
