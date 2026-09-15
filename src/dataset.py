@@ -130,13 +130,16 @@ def read_test_csv(csv_path: Path) -> List[Dict]:
     return rows
 
 
-def filter_existing_rows(rows: List[Dict], data_dir: Path,
-                         show_progress: bool = True) -> List[Dict]:
+def filter_existing_rows(rows, data_dir, show_progress=True):
     """
     Оставляет только те строки, у которых есть файл изображения.
-    Если gt указан, но файла нет — строка считается negative (gt=None).
 
-    Возвращает отфильтрованный список.
+    ВАЖНО: если в CSV указан gt_path, но файла маски нет —
+    строка пропускается (не превращается в negative!).
+    Это защита от label noise.
+
+    Returns:
+        Отфильтрованный список строк.
     """
     try:
         from tqdm import tqdm
@@ -145,19 +148,31 @@ def filter_existing_rows(rows: List[Dict], data_dir: Path,
         iterator = rows
 
     result = []
+    n_missing_img = 0
+    n_missing_gt = 0
+
     for row in iterator:
         img_path = resolve_path(row['chng'], data_dir)
         if not img_path.exists():
+            n_missing_img += 1
             continue
 
         gt = row.get('gt')
         if gt is not None:
             gt_path = resolve_path(gt, data_dir)
             if not gt_path.exists():
-                # Файла маски нет — трактуем как negative
-                row = {'chng': row['chng'], 'gt': None}
+                # Маска указана, но файла нет — это потерянный positive.
+                # НЕ превращаем в negative, а пропускаем строку.
+                n_missing_gt += 1
+                continue
 
         result.append(row)
+
+    if show_progress:
+        print(f'   Пропущено (нет img):   {n_missing_img}')
+        print(f'   Пропущено (нет mask):  {n_missing_gt}')
+        print(f'   Осталось для обучения: {len(result)}')
+
     return result
 
 

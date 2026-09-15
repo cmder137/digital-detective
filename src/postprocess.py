@@ -21,19 +21,26 @@ def clean_mask(
     mask: np.ndarray,
     min_area_ratio: float = 0.001,
     connectivity: int = 8,
+    bin_threshold: float = 0.5,
 ) -> np.ndarray:
     """
     Удаляет мелкие связные компоненты из бинарной маски.
 
     Args:
-        mask: np.ndarray (H, W) — бинарная маска.
-              Значения: 0 / 1, 0 / 255, bool или float — всё приведётся к 0/1.
+        mask: np.ndarray (H, W) — маска.
+              Поддерживаются форматы:
+                - bool
+                - uint8 0/1
+                - uint8 0/255 (PNG)
+                - float32/float64 [0, 1] (вероятности модели)
         min_area_ratio: минимальная площадь компоненты как доля от площади
                         картинки. Всё, что меньше — удаляется.
                         Default 0.001 = 0.1% площади.
-                        Для борьбы с FPR в соревновании можно поставить 0.005–0.01 (0.5–1%).
-        connectivity: 4 или 8. 8 — «диагональные» пиксели считаются соседями,
-                      склеивает компоненты агрессивнее. Default 8.
+        connectivity: 4 или 8. 8 — диагональные пиксели считаются соседями.
+        bin_threshold: порог бинаризации для float-масок в шкале [0, 1].
+                       Используется, когда на вход подаются вероятности модели.
+                       Должен совпадать с threshold, который подбирает MLOps.
+                       Default 0.5.
 
     Returns:
         np.ndarray (H, W) uint8 — очищенная маска со значениями 0 / 1.
@@ -45,13 +52,16 @@ def clean_mask(
     m = np.asarray(mask)
     if m.ndim == 3:
         m = m[:, :, 0]  # если пришло (H, W, 1)
+
     if m.dtype == bool:
         m = m.astype(np.uint8)
     elif m.max() > 1:
-        # если 0/255 или 0..1 float — нормализуем
-        m = (m > 127).astype(np.uint8) if m.max() > 1 else (m > 0.5).astype(np.uint8)
+        # Маска в шкале 0/255 (например, PNG-файл)
+        m = (m > 127).astype(np.uint8)
     else:
-        m = m.astype(np.uint8)
+        # Float-маска в шкале [0, 1] (вероятности модели)
+        # bin_threshold синхронизирован с threshold из predict.py
+        m = (m > bin_threshold).astype(np.uint8)
 
     h, w = m.shape[:2]
     min_area = int(h * w * min_area_ratio)
@@ -75,13 +85,6 @@ def clean_mask(
     return clean
 
 
-def clean_mask_strict(mask: np.ndarray) -> np.ndarray:
-    """
-    Более агрессивная чистка для соревнования: удаляет всё, что < 1%
-    площади картинки. Соответствует порогу FPR из условий AIC.
-    """
-    return clean_mask(mask, min_area_ratio=0.01)
-
 
 def clean_mask_soft(mask: np.ndarray) -> np.ndarray:
     """
@@ -90,10 +93,18 @@ def clean_mask_soft(mask: np.ndarray) -> np.ndarray:
     """
     return clean_mask(mask, min_area_ratio=0.001)
 
+def clean_mask_strict(mask: np.ndarray) -> np.ndarray:
+    """
+    Жёсткая чистка под FPR соревнования: удаляет всё, что < 1% площади.
+    Используй, если модель шумит на negative-картинках.
+    """
+    return clean_mask(mask, min_area_ratio=0.01)
+
 
 # ============================================================
 # ТЕСТЫ
 # ============================================================
+
 if __name__ == '__main__':
     import time
 
@@ -182,3 +193,15 @@ if __name__ == '__main__':
 
     print('\n' + '=' * 60)
     print('🎉 Все тесты пройдены!')
+
+    # --- Тест 8: Float-маска в шкале [0, 1] ---
+    mask_float = np.zeros((256, 256), dtype=np.float32)
+    mask_float[50:150, 50:150] = 0.9      # крупный объект
+    mask_float[200:201, 200:201] = 0.8    # шум
+
+    cleaned = clean_mask(mask_float, min_area_ratio=0.001)
+    print(f'\nТест 8 — float-маска [0, 1]:')
+    print(f'  До:    {mask_float.sum():.1f} (сумма float)')
+    print(f'  После: {cleaned.sum()} пикселей (ожидалось 10000)')
+    assert cleaned.sum() == 10_000, f'Ожидалось 10000, получили {cleaned.sum()}'
+    print('  ✅ Прошло (float-маска корректно бинаризована)')
