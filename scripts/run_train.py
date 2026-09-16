@@ -125,6 +125,7 @@ def main():
     
     rows = read_train_csv(csv_path)
     rows = filter_existing_rows(rows, data_dir, show_progress=True)
+    rows = rows[:100]
     
     if not rows:
         logger.error(f"Ни одного файла не найдено. Проверьте --data-dir: {args.data_dir}")

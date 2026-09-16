@@ -83,7 +83,7 @@ def setup_logging(log_dir: str = 'results/logs', log_name: str = 'train.log') ->
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
     
     # File handler
-    fh = logging.FileHandler(os.path.join(log_dir, log_name))
+    fh = logging.FileHandler(os.path.join(log_dir, log_name), encoding='utf-8') # <--- ДОБАВИТЬ encoding='utf-8'
     fh.setLevel(logging.INFO)
     fh.setFormatter(formatter)
     logger.addHandler(fh)

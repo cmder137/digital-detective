@@ -25,7 +25,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -270,6 +270,12 @@ class TrainDataset(Dataset):
         else:
             gt_path = resolve_path(row['gt'], self.data_dir)
             mask = load_mask_binary(gt_path)
+            
+            # ЗАЩИТА: Если маска кривая и не совпадает по размеру с картинкой
+            if mask.shape[:2] != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        # --- Аугментации (синхронно для img и mask) ---
 
         # --- Аугментации (синхронно для img и mask) ---
         augmented = self.transforms(image=img, mask=mask)
