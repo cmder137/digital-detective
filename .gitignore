@@ -142,3 +142,4 @@ lightning_logs/
 !results/metrics.csv
 !submission/submission.csv
 !configs/*.csv
+!predict.md
