@@ -1,0 +1,14 @@
+{
+    "data_dir": "data",
+    "test_csv": "stage1/test.csv",
+    "checkpoint": "checkpoints/random.pth",
+    "architecture": "unet",
+    "encoder": "resnet34",
+    "img_size": 384,
+    "batch_size": 8,
+    "num_workers": 2,
+    "threshold": 0.5,
+    "min_area_ratio": 0.001,
+    "pred_dir": "predictions",
+    "submission_csv": "submission.csv"
+}
