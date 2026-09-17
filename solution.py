@@ -606,3 +606,7 @@ def main():
         'all': cmd_all,
     }
     cmd_map[args.cmd](args)
+
+
+if __name__ == '__main__':
+    main()
