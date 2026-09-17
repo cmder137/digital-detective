@@ -309,9 +309,9 @@ def cmd_train(args):
     rows = filter_existing_rows(rows, data_dir, show_progress=True)
     logger.info(f'Доступно строк: {len(rows)}')
 
+    #убрала labels_path
     train_rows, val_rows = stratified_split(
-        rows, val_ratio=cfg.val_ratio, seed=cfg.seed,
-        labels_path=labels_path,
+        rows, val_ratio=cfg.val_ratio, seed=cfg.seed
     )
     logger.info(f'Train: {len(train_rows)}, Val: {len(val_rows)}')
 
@@ -390,11 +390,11 @@ def cmd_tune(args):
         return
 
     # --- Данные ---
+    #убрала labels_path
     rows = read_train_csv(train_csv)
     rows = filter_existing_rows(rows, data_dir, show_progress=True)
     _, val_rows = stratified_split(
-        rows, val_ratio=cfg.val_ratio, seed=cfg.seed,
-        labels_path=labels_path,
+        rows, val_ratio=cfg.val_ratio, seed=cfg.seed
     )
 
     val_ds = TrainDataset(
@@ -498,7 +498,7 @@ def cmd_predict(args):
     if opt_path.exists():
         with open(opt_path, encoding='utf-8') as f:
             opt = json.load(f)
-        cfg.threshold = opt.get('optimal_threshold', cfg.threshold)
+        cfg.threshold = opt.get('threshold', cfg.threshold)
         logger.info(f'Порог из {opt_path}: {cfg.threshold:.2f}')
 
     from src.predict import run_predict
@@ -573,41 +573,29 @@ def main():
         description='AI Challenge 2026 — Digital Detective (единая точка входа)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
+
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
         '--config', type=str, default=None,
-        help='Путь к JSON-конфигу (по умолчанию используются DEFAULTS)',
+        help='Путь к JSON-конфигу',
     )
-    parser.add_argument(
+    parent.add_argument(
         '--data-dir', type=str, default='data',
         help='Корень датасета',
     )
 
     sub = parser.add_subparsers(dest='cmd', required=True)
 
-    # check
-    sub.add_parser('check', help='Проверка окружения')
-
-    # eda
-    sub.add_parser('eda', help='EDA: статистика и графики')
-
-    # label
-    sub.add_parser('label', help='Разметка строк → labels.csv')
-
-    # train
-    sub.add_parser('train', help='Обучение модели → best.pth')
-
-    # tune
-    sub.add_parser('tune', help='Threshold tuning → optimal_threshold.json')
-
-    # predict
-    sub.add_parser('predict', help='Инференс → submission.csv')
-
-    # all
-    sub.add_parser('all', help='Полный пайплайн 1→5')
+    sub.add_parser('check',   parents=[parent], help='Проверка окружения')
+    sub.add_parser('eda',     parents=[parent], help='EDA: статистика и графики')
+    sub.add_parser('label',   parents=[parent], help='Разметка строк → labels.csv')
+    sub.add_parser('train',   parents=[parent], help='Обучение модели → best.pth')
+    sub.add_parser('tune',    parents=[parent], help='Threshold tuning → optimal_threshold.json')
+    sub.add_parser('predict', parents=[parent], help='Инференс → submission.csv')
+    sub.add_parser('all',     parents=[parent], help='Полный пайплайн 1→5')
 
     args = parser.parse_args()
 
-    # Роутинг
     cmd_map = {
         'check': cmd_check,
         'eda': cmd_eda,
@@ -618,7 +606,3 @@ def main():
         'all': cmd_all,
     }
     cmd_map[args.cmd](args)
-
-
-if __name__ == '__main__':
-    main()

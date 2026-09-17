@@ -1,0 +1,18 @@
+{
+  "data_dir": "data",
+  "train_csv": "stage1/train.csv",
+  "test_csv": "test_stage1/test.csv",
+  "architecture": "unet",
+  "encoder": "resnet34",
+  "img_size": 256,
+  "batch_size": 32,
+  "num_workers": 8,
+  "val_ratio": 0.15,
+  "threshold": 0.5,
+  "min_area_ratio": 0.001,
+  "checkpoint_dir": "checkpoints",
+  "pred_dir": "predictions",
+  "submission_csv": "submission.csv",
+  "results_dir": "results",
+  "seed": 42
+}
