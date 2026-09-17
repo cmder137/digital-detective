@@ -50,8 +50,11 @@ def get_train_transforms(img_size: int) -> A.Compose:
 
         # Устойчивость к «пятнам»
         A.CoarseDropout(
-            max_holes=4, max_height=32, max_width=32,
-            fill_value=0, p=0.15,
+            num_holes_range=(1, 4),
+            hole_height_range=(1, 32),
+            hole_width_range=(1, 32),
+            fill=0,
+            p=0.15,
         ),
 
         A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
